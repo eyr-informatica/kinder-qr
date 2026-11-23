@@ -133,7 +133,7 @@ async function cargarLista(avisar) {
     const nuevo = {};
     r.accesos.forEach(a => {
       const ing = a.ing.slice();
-      S.cola.filter(x => x.c === a.c).forEach(x => {
+      S.cola.filter(x => x.c === a.c && !x.x).forEach(x => {
         if (!ing.some(y => y.d === x.d && Math.abs(y.h - x.t) < 2000)) ing.push({ h: x.t, d: x.d });
       });
       nuevo[a.c] = { n: a.n, cu: a.cu, max: a.max, ing: ing.slice(0, Math.max(a.max, ing.length)) };
@@ -155,8 +155,8 @@ async function sincronizar() {
   try {
     const r = await api({ accion: 'ingresos', items: JSON.stringify(lote) });
     if (!r.ok) throw new Error(r.error);
-    const hechos = new Set(lote.map(x => x.c + '|' + x.t));
-    S.cola = S.cola.filter(x => !hechos.has(x.c + '|' + x.t));
+    const hechos = new Set(lote.map(x => x.c + '|' + x.t + '|' + (x.x || '')));
+    S.cola = S.cola.filter(x => !hechos.has(x.c + '|' + x.t + '|' + (x.x || '')));
     r.resultados.forEach(x => {
       const a = S.acc[x.c];
       if (x.r === 'LLENO' && a) {
@@ -188,11 +188,13 @@ function procesar(raw) {
   const a = S.acc[c];
   if (!a) {
     mostrar('bad', '✖', 'CÓDIGO NO VÁLIDO', 'No corresponde a ningún acceso', '');
-    addHist('Código no válido', false); return;
+    S.cola.push({ c: c.slice(0, 40), t: now, d: S.cfg.disp, x: 'INVALIDO' }); guardarLS();
+    addHist('Código no válido', false); sincronizar(); return;
   }
   if (a.ing.length >= a.max) {
     mostrar('bad', '✖', 'CUPO COMPLETO', a.n + ' – ' + a.cu, 'Ya ingresaron ' + a.max + ' personas: ' + a.ing.map(i => hora(i.h)).join(' y '));
-    addHist(a.n + ' · CUPO COMPLETO', false); return;
+    S.cola.push({ c, t: now, d: S.cfg.disp, x: 'LLENO' }); guardarLS();
+    addHist(a.n + ' · CUPO COMPLETO', false); sincronizar(); return;
   }
   a.ing.push({ h: now, d: S.cfg.disp });
   S.cola.push({ c, t: now, d: S.cfg.disp });
@@ -260,6 +262,10 @@ function buscar() {
 }
 
 /* ---------- Interfaz ---------- */
+function limpiarHist() {
+  if (!confirm('¿Borrar el historial de este celular? (no borra nada de la planilla)')) return;
+  S.hist = []; S.avisos = []; guardarLS(); render();
+}
 function addHist(txt, ok) {
   S.hist.unshift({ t: Date.now(), txt, ok });
   S.hist = S.hist.slice(0, 8);
@@ -281,7 +287,8 @@ function render() {
     av.innerHTML = '<b>Atención:</b><br>' + S.avisos.slice(0, 3).map(esc).join('<br>') + '<br><button onclick="S.avisos=[];guardarLS();render()">Entendido</button>';
   } else av.style.display = 'none';
   $('hist').innerHTML = S.hist.length ? '<div class="tit">Últimos escaneos</div>' + S.hist.map(h =>
-    '<div class="h"><span>' + (h.ok ? '✅ ' : '❌ ') + esc(h.txt) + '</span><span class="sub">' + hora(h.t) + '</span></div>').join('') : '';
+    '<div class="h"><span>' + (h.ok ? '✅ ' : '❌ ') + esc(h.txt) + '</span><span class="sub">' + hora(h.t) + '</span></div>').join('') +
+    '<button class="sec" style="width:100%;margin-top:12px" onclick="limpiarHist()">Limpiar historial</button>' : '';
 }
 
 function initAudio() {
