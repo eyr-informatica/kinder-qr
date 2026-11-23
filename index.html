@@ -116,12 +116,12 @@ function iniciarApp() {
 }
 
 /* ---------- Comunicación con Google Sheets ---------- */
-async function api(p) {
+async function api(p, ms) {
   const u = new URL(S.cfg.url);
   u.searchParams.set('pin', S.cfg.pin);
   for (const k in p) u.searchParams.set(k, p[k]);
   const ctrl = new AbortController();
-  const to = setTimeout(() => ctrl.abort(), 10000);
+  const to = setTimeout(() => ctrl.abort(), ms || 10000);
   try { const res = await fetch(u.toString(), { signal: ctrl.signal }); return await res.json(); }
   finally { clearTimeout(to); }
 }
@@ -196,10 +196,48 @@ function procesar(raw) {
     S.cola.push({ c, t: now, d: S.cfg.disp, x: 'LLENO' }); guardarLS();
     addHist(a.n + ' · CUPO COMPLETO', false); sincronizar(); return;
   }
+  if (online !== false) { validarEnLinea(c, a, now); return; }
+  aceptarLocal(c, a, now);
+}
+
+/* Con internet: se confirma con la planilla ANTES de mostrar verde,
+   así un mismo QR (o su screenshot) no puede pasar en dos puntos. */
+async function validarEnLinea(c, a, now) {
+  bloqueo = true;
+  const r = $('res');
+  r.style.background = '#334155';
+  r.innerHTML = '<div class="t1">Verificando…</div><div class="t2">' + esc(a.n) + '</div>';
+  r.style.display = 'flex';
+  clearTimeout(timerRes);
+  try {
+    const resp = await api({ accion: 'ingresos', items: JSON.stringify([{ c, t: now, d: S.cfg.disp }]) }, 5000);
+    if (!resp.ok) throw new Error(resp.error);
+    const x = resp.resultados[0];
+    setOnline(true);
+    if (x.r === 'OK') {
+      a.ing.push({ h: now, d: S.cfg.disp }); guardarLS();
+      mostrar('ok', '✔', 'PUEDE INGRESAR', a.n + ' – ' + a.cu, 'Persona ' + a.ing.length + ' de ' + a.max);
+      addHist(a.n + ' · persona ' + a.ing.length + '/' + a.max, true);
+    } else if (x.r === 'LLENO') {
+      a.ing = x.ing; guardarLS();
+      mostrar('bad', '✖', 'CUPO COMPLETO', a.n + ' – ' + a.cu, 'Ya ingresaron: ' + x.ing.map(i => hora(i.h) + ' (' + i.d + ')').join(' y '));
+      addHist(a.n + ' · CUPO COMPLETO', false);
+    } else {
+      mostrar('bad', '✖', 'CÓDIGO NO VÁLIDO', 'No corresponde a ningún acceso', '');
+      addHist('Código no válido', false);
+    }
+  } catch (e) {
+    // Sin respuesta: se valida con la lista local y se sube después
+    setOnline(false);
+    aceptarLocal(c, a, now);
+  }
+}
+
+function aceptarLocal(c, a, now) {
   a.ing.push({ h: now, d: S.cfg.disp });
   S.cola.push({ c, t: now, d: S.cfg.disp });
   guardarLS();
-  mostrar('ok', '✔', 'PUEDE INGRESAR', a.n + ' – ' + a.cu, 'Persona ' + a.ing.length + ' de ' + a.max);
+  mostrar('ok', '✔', 'PUEDE INGRESAR', a.n + ' – ' + a.cu, 'Persona ' + a.ing.length + ' de ' + a.max + ' (sin conexión)');
   addHist(a.n + ' · persona ' + a.ing.length + '/' + a.max, true);
   sincronizar();
 }
@@ -314,7 +352,7 @@ document.addEventListener('click', initAudio);
 cargarLS();
 if (S.cfg) iniciarApp(); else abrirSetup();
 setInterval(sincronizar, 5000);
-setInterval(() => { if (S.cfg && !S.cola.length && !bloqueo) cargarLista(false); }, 30000);
+setInterval(() => { if (S.cfg && !S.cola.length && !bloqueo) cargarLista(false); }, 15000);
 window.addEventListener('online', sincronizar);
 </script>
 </body>
