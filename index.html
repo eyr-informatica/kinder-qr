@@ -1,0 +1,314 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1">
+<meta name="theme-color" content="#0f172a">
+<title>Escáner Kínder</title>
+<script src="https://unpkg.com/html5-qrcode@2.3.8/html5-qrcode.min.js"></script>
+<style>
+:root{--bg:#0f172a;--card:#1e293b;--txt:#f1f5f9;--mut:#94a3b8;--ok:#16a34a;--bad:#dc2626;--warn:#f59e0b;--azul:#2563eb}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--txt);font-family:system-ui,-apple-system,"Segoe UI",Roboto,sans-serif}
+header{display:flex;justify-content:space-between;align-items:center;padding:12px 16px;background:var(--card);position:sticky;top:0;z-index:5}
+.cnt{font-size:24px;font-weight:800}
+.sub{font-size:12px;color:var(--mut)}
+.estado{font-size:13px;display:flex;align-items:center;gap:6px}
+.dot{width:12px;height:12px;border-radius:50%;background:var(--mut)}
+main{padding:16px;max-width:520px;margin:auto}
+#reader{width:100%;border-radius:12px;overflow:hidden;background:#000;min-height:40px}
+#reader video{border-radius:12px}
+button{font:inherit;border:0;border-radius:10px;padding:14px;font-weight:600;cursor:pointer}
+.prim{background:var(--azul);color:#fff;width:100%}
+.sec{background:var(--card);color:var(--txt)}
+.fila{display:flex;gap:8px;margin-top:10px}
+.fila>*{flex:1}
+input{font:inherit;width:100%;padding:12px;border-radius:10px;border:1px solid #334155;background:#0b1222;color:var(--txt);margin:6px 0 14px}
+label{font-size:14px;color:var(--mut)}
+h2{margin-top:8px}
+#hist{margin-top:18px;font-size:14px}
+#hist .tit{color:var(--mut);margin-bottom:4px}
+.h{display:flex;justify-content:space-between;gap:8px;padding:8px 0;border-bottom:1px solid var(--card)}
+#res{position:fixed;inset:0;display:none;flex-direction:column;justify-content:center;align-items:center;text-align:center;padding:24px;z-index:10;color:#fff}
+#res .ic{font-size:110px;line-height:1;font-weight:900}
+#res .t1{font-size:36px;font-weight:900;margin-top:14px}
+#res .t2{font-size:28px;margin-top:12px;font-weight:700}
+#res .t3{font-size:22px;margin-top:8px;opacity:.95}
+#aviso{display:none;background:var(--warn);color:#111;padding:12px;border-radius:10px;margin-bottom:12px;font-size:14px}
+#aviso button{background:#111;color:#fff;padding:8px 12px;margin-top:8px}
+.oculto{display:none!important}
+</style>
+</head>
+<body>
+
+<div id="setup" class="oculto"><main>
+  <h2>Configurar escáner</h2>
+  <label>URL del sistema (Apps Script)</label>
+  <input id="cfgUrl" placeholder="https://script.google.com/macros/s/.../exec" autocomplete="off">
+  <label>PIN</label>
+  <input id="cfgPin" type="password" inputmode="numeric" autocomplete="off">
+  <label>Nombre de este punto</label>
+  <input id="cfgDisp" placeholder="Entrada 1">
+  <button class="prim" onclick="guardarConfig()">Guardar y cargar lista</button>
+  <p id="setupMsg" class="sub"></p>
+</main></div>
+
+<div id="app" class="oculto">
+  <header>
+    <div><div class="cnt" id="cnt">0 / 0</div><div class="sub" id="disp"></div></div>
+    <div class="estado"><span class="dot" id="dot"></span><span id="est">—</span></div>
+  </header>
+  <main>
+    <div id="aviso"></div>
+    <div id="reader"></div>
+    <button class="prim" id="btnCam" onclick="toggleCam()" style="margin-top:12px">Activar cámara</button>
+    <div class="fila">
+      <button class="sec" onclick="manual()">Código a mano</button>
+      <button class="sec" onclick="cargarLista(true)">Actualizar lista</button>
+    </div>
+    <div class="fila">
+      <button class="sec" onclick="buscar()">Buscar alumno</button>
+      <button class="sec" onclick="abrirSetup()">Configuración</button>
+    </div>
+    <div id="hist"></div>
+  </main>
+</div>
+
+<div id="res" onclick="ocultarRes()"></div>
+
+<script>
+const LS = 'kinderqr_v1';
+let S = { cfg: null, acc: {}, cola: [], hist: [], avisos: [] };
+let qr = null, camOn = false, bloqueo = false, ultimo = { c: '', t: 0 };
+let sincronizando = false, online = null, audio = null, timerRes = null;
+
+const $ = id => document.getElementById(id);
+const esc = s => String(s ?? '').replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+const hora = ms => ms ? new Date(ms).toLocaleTimeString('es-CL', { hour: '2-digit', minute: '2-digit' }) : '—';
+
+function cargarLS() { try { const x = JSON.parse(localStorage.getItem(LS) || 'null'); if (x) S = Object.assign(S, x); } catch (e) {} }
+function guardarLS() { try { localStorage.setItem(LS, JSON.stringify(S)); } catch (e) {} }
+
+/* ---------- Configuración ---------- */
+function abrirSetup() {
+  if (camOn) toggleCam();
+  $('app').classList.add('oculto');
+  $('setup').classList.remove('oculto');
+  if (S.cfg) { $('cfgUrl').value = S.cfg.url; $('cfgPin').value = S.cfg.pin; $('cfgDisp').value = S.cfg.disp; }
+}
+
+async function guardarConfig() {
+  const url = $('cfgUrl').value.trim(), pin = $('cfgPin').value.trim(), disp = $('cfgDisp').value.trim() || 'Entrada 1';
+  if (!url.startsWith('https://')) { $('setupMsg').textContent = 'La URL debe empezar con https://'; return; }
+  S.cfg = { url, pin, disp };
+  $('setupMsg').textContent = 'Conectando…';
+  const r = await cargarLista(false);
+  if (r === true) { guardarLS(); iniciarApp(); }
+  else $('setupMsg').textContent = r || 'No se pudo conectar. Revisa la URL y el PIN.';
+}
+
+function iniciarApp() {
+  $('setup').classList.add('oculto');
+  $('app').classList.remove('oculto');
+  render();
+  cargarLista(false);
+  sincronizar();
+}
+
+/* ---------- Comunicación con Google Sheets ---------- */
+async function api(p) {
+  const u = new URL(S.cfg.url);
+  u.searchParams.set('pin', S.cfg.pin);
+  for (const k in p) u.searchParams.set(k, p[k]);
+  const ctrl = new AbortController();
+  const to = setTimeout(() => ctrl.abort(), 10000);
+  try { const res = await fetch(u.toString(), { signal: ctrl.signal }); return await res.json(); }
+  finally { clearTimeout(to); }
+}
+
+async function cargarLista(avisar) {
+  try {
+    const r = await api({ accion: 'lista' });
+    if (!r.ok) { setOnline(true); if (avisar) alert(r.error); return r.error; }
+    const nuevo = {};
+    r.accesos.forEach(a => {
+      const ing = a.ing.slice();
+      S.cola.filter(x => x.c === a.c).forEach(x => {
+        if (!ing.some(y => y.d === x.d && Math.abs(y.h - x.t) < 2000)) ing.push({ h: x.t, d: x.d });
+      });
+      nuevo[a.c] = { n: a.n, cu: a.cu, max: a.max, ing: ing.slice(0, Math.max(a.max, ing.length)) };
+    });
+    S.acc = nuevo; guardarLS(); setOnline(true); render();
+    if (avisar) alert('Lista actualizada: ' + r.accesos.length + ' accesos.');
+    return true;
+  } catch (e) {
+    setOnline(false);
+    if (avisar) alert('Sin conexión. Se sigue usando la lista guardada en este equipo.');
+    return false;
+  }
+}
+
+async function sincronizar() {
+  if (sincronizando || !S.cfg || !S.cola.length) { render(); return; }
+  sincronizando = true;
+  const lote = S.cola.slice(0, 15);
+  try {
+    const r = await api({ accion: 'ingresos', items: JSON.stringify(lote) });
+    if (!r.ok) throw new Error(r.error);
+    const hechos = new Set(lote.map(x => x.c + '|' + x.t));
+    S.cola = S.cola.filter(x => !hechos.has(x.c + '|' + x.t));
+    r.resultados.forEach(x => {
+      const a = S.acc[x.c];
+      if (x.r === 'LLENO' && a) {
+        a.ing = x.ing;
+        S.avisos.unshift('Invitación de ' + a.n + ': entró una persona de más por otro punto sin conexión. Ingresos registrados: ' + x.ing.map(i => hora(i.h) + ' (' + i.d + ')').join(', ') + '.');
+      }
+    });
+    guardarLS(); setOnline(true);
+  } catch (e) { setOnline(false); }
+  sincronizando = false;
+  render();
+  if (S.cola.length && online) setTimeout(sincronizar, 500);
+}
+
+function setOnline(v) { online = v; render(); }
+
+/* ---------- Escaneo ---------- */
+function procesar(raw) {
+  if (bloqueo) return;
+  const c = String(raw || '').toUpperCase().replace(/[^A-Z0-9]/g, '');
+  if (!c) return;
+  const now = Date.now();
+  if (c === ultimo.c && now - ultimo.t < 4000) return;
+  ultimo = { c, t: now };
+
+  if (!Object.keys(S.acc).length) {
+    mostrar('bad', '!', 'LISTA NO CARGADA', 'Conecte a internet', 'y presione "Actualizar lista"'); return;
+  }
+  const a = S.acc[c];
+  if (!a) {
+    mostrar('bad', '✖', 'CÓDIGO NO VÁLIDO', 'No corresponde a ningún acceso', '');
+    addHist('Código no válido', false); return;
+  }
+  if (a.ing.length >= a.max) {
+    mostrar('bad', '✖', 'CUPO COMPLETO', a.n + ' – ' + a.cu, 'Ya ingresaron ' + a.max + ' personas: ' + a.ing.map(i => hora(i.h)).join(' y '));
+    addHist(a.n + ' · CUPO COMPLETO', false); return;
+  }
+  a.ing.push({ h: now, d: S.cfg.disp });
+  S.cola.push({ c, t: now, d: S.cfg.disp });
+  guardarLS();
+  mostrar('ok', '✔', 'PUEDE INGRESAR', a.n + ' – ' + a.cu, 'Persona ' + a.ing.length + ' de ' + a.max);
+  addHist(a.n + ' · persona ' + a.ing.length + '/' + a.max, true);
+  sincronizar();
+}
+
+function mostrar(tipo, ic, t1, t2, t3) {
+  const r = $('res');
+  r.style.background = tipo === 'ok' ? 'var(--ok)' : 'var(--bad)';
+  r.innerHTML = '<div class="ic">' + esc(ic) + '</div><div class="t1">' + esc(t1) + '</div><div class="t2">' + esc(t2) + '</div><div class="t3">' + esc(t3) + '</div>';
+  r.style.display = 'flex';
+  bloqueo = true;
+  beep(tipo === 'ok');
+  try { navigator.vibrate && navigator.vibrate(tipo === 'ok' ? 80 : [200, 80, 200]); } catch (e) {}
+  clearTimeout(timerRes);
+  timerRes = setTimeout(ocultarRes, tipo === 'ok' ? 1500 : 2800);
+}
+function ocultarRes() { $('res').style.display = 'none'; bloqueo = false; render(); }
+
+async function toggleCam() {
+  initAudio();
+  const b = $('btnCam');
+  if (camOn) { try { await qr.stop(); } catch (e) {} camOn = false; b.textContent = 'Activar cámara'; return; }
+  if (!qr) qr = new Html5Qrcode('reader');
+  try {
+    await qr.start({ facingMode: 'environment' },
+      { fps: 12, qrbox: (w, h) => { const s = Math.floor(Math.min(w, h) * 0.7); return { width: s, height: s }; } },
+      txt => procesar(txt), () => {});
+    camOn = true; b.textContent = 'Detener cámara';
+  } catch (e) { alert('No se pudo abrir la cámara: ' + e); }
+}
+
+/* Lector USB: escribe el código como teclado y termina con Enter */
+let buf = '', bufT = 0;
+document.addEventListener('keydown', e => {
+  if ($('app').classList.contains('oculto') || e.target.tagName === 'INPUT') return;
+  const now = Date.now();
+  if (now - bufT > 100) buf = '';
+  bufT = now;
+  if (e.key === 'Enter') { if (buf.length >= 6) procesar(buf); buf = ''; e.preventDefault(); return; }
+  if (e.key.length === 1) buf += e.key;
+});
+
+function manual() {
+  const c = prompt('Ingrese el código (ej: K6H3TQ9WPA):');
+  if (c) { ultimo = { c: '', t: 0 }; procesar(c); }
+}
+
+function buscar() {
+  const q = (prompt('Nombre o apellido del alumno:') || '').trim().toLowerCase();
+  if (!q) return;
+  const g = {};
+  Object.values(S.acc).forEach(a => {
+    if (!a.n.toLowerCase().includes(q)) return;
+    const k = a.n + ' (' + a.cu + ')';
+    (g[k] = g[k] || []).push(a);
+  });
+  const keys = Object.keys(g);
+  if (!keys.length) { alert('No se encontró ningún alumno.'); return; }
+  alert(keys.slice(0, 8).map(k => g[k].map(a => k + '\n  Ingresaron ' + a.ing.length + ' de ' + a.max +
+    (a.ing.length ? ': ' + a.ing.map(i => hora(i.h)).join(', ') : '')).join('\n')).join('\n\n'));
+}
+
+/* ---------- Interfaz ---------- */
+function addHist(txt, ok) {
+  S.hist.unshift({ t: Date.now(), txt, ok });
+  S.hist = S.hist.slice(0, 8);
+  guardarLS();
+}
+
+function render() {
+  if (!S.cfg) return;
+  const lista = Object.values(S.acc);
+  $('cnt').textContent = lista.reduce((s, a) => s + a.ing.length, 0) + ' / ' + lista.reduce((s, a) => s + a.max, 0);
+  $('disp').textContent = 'Ingresados · ' + S.cfg.disp;
+  const dot = $('dot'), est = $('est');
+  if (online === false) { dot.style.background = 'var(--bad)'; est.textContent = 'Sin conexión' + (S.cola.length ? ' · ' + S.cola.length + ' por subir' : ''); }
+  else if (S.cola.length) { dot.style.background = 'var(--warn)'; est.textContent = 'Subiendo ' + S.cola.length; }
+  else if (online) { dot.style.background = 'var(--ok)'; est.textContent = 'En línea'; }
+  const av = $('aviso');
+  if (S.avisos.length) {
+    av.style.display = 'block';
+    av.innerHTML = '<b>Atención:</b><br>' + S.avisos.slice(0, 3).map(esc).join('<br>') + '<br><button onclick="S.avisos=[];guardarLS();render()">Entendido</button>';
+  } else av.style.display = 'none';
+  $('hist').innerHTML = S.hist.length ? '<div class="tit">Últimos escaneos</div>' + S.hist.map(h =>
+    '<div class="h"><span>' + (h.ok ? '✅ ' : '❌ ') + esc(h.txt) + '</span><span class="sub">' + hora(h.t) + '</span></div>').join('') : '';
+}
+
+function initAudio() {
+  try {
+    if (!audio) audio = new (window.AudioContext || window.webkitAudioContext)();
+    if (audio.state === 'suspended') audio.resume();
+  } catch (e) {}
+}
+function beep(ok) {
+  if (!audio) return;
+  const tonos = ok ? [[1000, 0.12]] : [[220, 0.2], [170, 0.3]];
+  let t = audio.currentTime;
+  tonos.forEach(([f, d]) => {
+    const o = audio.createOscillator(), g = audio.createGain();
+    o.type = 'square'; o.frequency.value = f; g.gain.value = 0.15;
+    o.connect(g); g.connect(audio.destination);
+    o.start(t); o.stop(t + d); t += d + 0.06;
+  });
+}
+document.addEventListener('click', initAudio);
+
+/* ---------- Inicio ---------- */
+cargarLS();
+if (S.cfg) iniciarApp(); else abrirSetup();
+setInterval(sincronizar, 5000);
+setInterval(() => { if (S.cfg && !S.cola.length && !bloqueo) cargarLista(false); }, 30000);
+window.addEventListener('online', sincronizar);
+</script>
+</body>
+</html>
